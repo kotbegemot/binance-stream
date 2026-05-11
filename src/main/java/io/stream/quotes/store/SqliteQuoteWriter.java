@@ -5,12 +5,12 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.sql.Connection;
-import java.sql.DriverManager;
 import java.sql.PreparedStatement;
 import java.sql.SQLException;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Objects;
 import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.TimeUnit;
 
@@ -23,38 +23,33 @@ public final class SqliteQuoteWriter implements AutoCloseable {
             VALUES (?, ?, ?, ?, ?, ?, ?)
             """;
 
-    private final String dbPath;
+    private final Connection connection;
     private final int batchMaxSize;
     private final long batchMaxWaitNanos;
     private final LinkedBlockingQueue<Quote> queue;
     private volatile boolean running = false;
-    private Connection connection;
     private Thread writerThread;
 
-    public SqliteQuoteWriter(String dbPath, int batchMaxSize, Duration batchMaxWait) {
-        this(dbPath, batchMaxSize, batchMaxWait, 10_000);
+    public SqliteQuoteWriter(Connection connection, int batchMaxSize, Duration batchMaxWait) {
+        this(connection, batchMaxSize, batchMaxWait, 10_000);
     }
 
-    public SqliteQuoteWriter(String dbPath, int batchMaxSize, Duration batchMaxWait, int queueCapacity) {
-        this.dbPath = dbPath;
+    public SqliteQuoteWriter(Connection connection, int batchMaxSize, Duration batchMaxWait, int queueCapacity) {
+        this.connection = Objects.requireNonNull(connection, "connection");
         this.batchMaxSize = batchMaxSize;
         this.batchMaxWaitNanos = batchMaxWait.toNanos();
         this.queue = new LinkedBlockingQueue<>(queueCapacity);
     }
 
-    public synchronized void start() throws SQLException {
+    public synchronized void start() {
         if (running) {
             return;
         }
-        connection = DriverManager.getConnection("jdbc:sqlite:" + dbPath);
-        SqliteSchema.applyPragmas(connection);
-        SqliteSchema.createTables(connection);
-        connection.setAutoCommit(false);
         running = true;
         writerThread = Thread.ofVirtual()
                 .name("sqlite-writer")
                 .start(this::runLoop);
-        log.info("sqlite writer started, db={}", dbPath);
+        log.info("sqlite writer started");
     }
 
     public boolean submit(Quote q) {
@@ -129,13 +124,7 @@ public final class SqliteQuoteWriter implements AutoCloseable {
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
         }
-        try {
-            if (connection != null && !connection.isClosed()) {
-                connection.close();
-            }
-        } catch (SQLException e) {
-            log.warn("error closing connection", e);
-        }
         log.info("sqlite writer stopped");
+        // Connection lifecycle is the provider's responsibility, not ours.
     }
 }

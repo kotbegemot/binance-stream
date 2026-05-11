@@ -19,11 +19,14 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 
+import static io.stream.quotes.support.TestSupport.quote;
+import static io.stream.quotes.support.TestSupport.rowCount;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.awaitility.Awaitility.await;
 
 class SqliteQuoteWriterTest {
 
+    private SqliteConnectionProvider provider;
     private SqliteQuoteWriter writer;
     private String dbPath;
 
@@ -32,13 +35,22 @@ class SqliteQuoteWriterTest {
         if (writer != null) {
             writer.close();
         }
+        if (provider != null) {
+            provider.close();
+        }
+    }
+
+    private void setupWriter(Path tmp, Duration batchWait) throws Exception {
+        dbPath = tmp.resolve("quotes.db").toString();
+        provider = new SqliteConnectionProvider(dbPath);
+        provider.open();
+        writer = new SqliteQuoteWriter(provider.quoteWriterConnection(), 100, batchWait);
+        writer.start();
     }
 
     @Test
     void persistsSingleQuoteReadableViaSql(@TempDir Path tmp) throws Exception {
-        dbPath = tmp.resolve("quotes.db").toString();
-        writer = new SqliteQuoteWriter(dbPath, 100, Duration.ofMillis(50));
-        writer.start();
+        setupWriter(tmp, Duration.ofMillis(50));
 
         Quote q = quote("BTCUSDT", 1L, "50000.00", "1.5", "50001.00", "2.0", 1715472000123L);
         assertThat(writer.submit(q)).isTrue();
@@ -61,9 +73,7 @@ class SqliteQuoteWriterTest {
 
     @Test
     void batchInsertPersistsThousandQuotes(@TempDir Path tmp) throws Exception {
-        dbPath = tmp.resolve("quotes.db").toString();
-        writer = new SqliteQuoteWriter(dbPath, 100, Duration.ofMillis(50));
-        writer.start();
+        setupWriter(tmp, Duration.ofMillis(50));
 
         for (int i = 0; i < 1000; i++) {
             assertThat(writer.submit(quote("BTCUSDT", i, "1", "1", "1", "1", 0))).isTrue();
@@ -74,9 +84,7 @@ class SqliteQuoteWriterTest {
 
     @Test
     void walModeActiveAfterStart(@TempDir Path tmp) throws Exception {
-        dbPath = tmp.resolve("quotes.db").toString();
-        writer = new SqliteQuoteWriter(dbPath, 100, Duration.ofMillis(50));
-        writer.start();
+        setupWriter(tmp, Duration.ofMillis(50));
         writer.submit(quote("BTC", 1L, "1", "1", "1", "1", 0));
         await().atMost(2, TimeUnit.SECONDS).until(() -> rowCount(dbPath) == 1);
 
@@ -90,9 +98,7 @@ class SqliteQuoteWriterTest {
 
     @Test
     void schemaHasExpectedColumns(@TempDir Path tmp) throws Exception {
-        dbPath = tmp.resolve("quotes.db").toString();
-        writer = new SqliteQuoteWriter(dbPath, 100, Duration.ofMillis(50));
-        writer.start();
+        setupWriter(tmp, Duration.ofMillis(50));
 
         try (Connection c = DriverManager.getConnection("jdbc:sqlite:" + dbPath);
              Statement s = c.createStatement();
@@ -109,9 +115,7 @@ class SqliteQuoteWriterTest {
 
     @Test
     void closeDrainsRemainingQueue(@TempDir Path tmp) throws Exception {
-        dbPath = tmp.resolve("quotes.db").toString();
-        writer = new SqliteQuoteWriter(dbPath, 100, Duration.ofMillis(500));
-        writer.start();
+        setupWriter(tmp, Duration.ofMillis(500));
 
         for (int i = 0; i < 500; i++) {
             writer.submit(quote("BTC", i, "1", "1", "1", "1", 0));
@@ -123,9 +127,7 @@ class SqliteQuoteWriterTest {
 
     @Test
     void dedupByPrimaryKeySymbolUpdateId(@TempDir Path tmp) throws Exception {
-        dbPath = tmp.resolve("quotes.db").toString();
-        writer = new SqliteQuoteWriter(dbPath, 100, Duration.ofMillis(50));
-        writer.start();
+        setupWriter(tmp, Duration.ofMillis(50));
 
         writer.submit(quote("BTCUSDT", 1L, "100", "1", "101", "1", 0));
         writer.submit(quote("BTCUSDT", 1L, "999", "9", "999", "9", 0));
@@ -143,9 +145,7 @@ class SqliteQuoteWriterTest {
 
     @Test
     void bigDecimalPrecisionRoundTrip(@TempDir Path tmp) throws Exception {
-        dbPath = tmp.resolve("quotes.db").toString();
-        writer = new SqliteQuoteWriter(dbPath, 100, Duration.ofMillis(50));
-        writer.start();
+        setupWriter(tmp, Duration.ofMillis(50));
 
         writer.submit(quote("BTC", 1L, "0.00000001", "0.00000002", "123456789.12345678", "0.5", 0));
         await().atMost(2, TimeUnit.SECONDS).until(() -> rowCount(dbPath) == 1);
@@ -162,9 +162,7 @@ class SqliteQuoteWriterTest {
 
     @Test
     void submitAfterCloseReturnsFalse(@TempDir Path tmp) throws Exception {
-        dbPath = tmp.resolve("quotes.db").toString();
-        writer = new SqliteQuoteWriter(dbPath, 100, Duration.ofMillis(50));
-        writer.start();
+        setupWriter(tmp, Duration.ofMillis(50));
         writer.close();
 
         assertThat(writer.submit(quote("BTC", 1L, "1", "1", "1", "1", 0))).isFalse();
@@ -172,9 +170,7 @@ class SqliteQuoteWriterTest {
 
     @Test
     void concurrentSubmitsFromMultipleThreads(@TempDir Path tmp) throws Exception {
-        dbPath = tmp.resolve("quotes.db").toString();
-        writer = new SqliteQuoteWriter(dbPath, 100, Duration.ofMillis(50));
-        writer.start();
+        setupWriter(tmp, Duration.ofMillis(50));
 
         int threads = 8;
         int perThread = 250;
@@ -205,19 +201,4 @@ class SqliteQuoteWriterTest {
         await().atMost(10, TimeUnit.SECONDS).until(() -> rowCount(dbPath) == threads * perThread);
     }
 
-    private static long rowCount(String dbPath) throws Exception {
-        try (Connection c = DriverManager.getConnection("jdbc:sqlite:" + dbPath);
-             Statement s = c.createStatement();
-             ResultSet rs = s.executeQuery("SELECT COUNT(*) FROM quotes")) {
-            return rs.next() ? rs.getLong(1) : 0L;
-        }
-    }
-
-    private static Quote quote(String symbol, long updateId, String bid, String bidSize,
-                                String ask, String askSize, long receivedAtMs) {
-        return new Quote(symbol,
-                new BigDecimal(bid), new BigDecimal(bidSize),
-                new BigDecimal(ask), new BigDecimal(askSize),
-                updateId, receivedAtMs);
-    }
 }

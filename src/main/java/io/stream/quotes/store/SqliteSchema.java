@@ -24,6 +24,29 @@ public final class SqliteSchema {
               ON quotes(symbol, received_at_wall_ms DESC)
             """;
 
+    public static final String CREATE_TRACKED_SYMBOLS = """
+            CREATE TABLE IF NOT EXISTS tracked_symbols (
+              symbol           TEXT PRIMARY KEY,
+              added_at_wall_ms INTEGER NOT NULL,
+              source           TEXT NOT NULL
+            )
+            """;
+
+    public static final String CREATE_ADMIN_REMOVED_SYMBOLS = """
+            CREATE TABLE IF NOT EXISTS admin_removed_symbols (
+              symbol             TEXT PRIMARY KEY,
+              removed_at_wall_ms INTEGER NOT NULL
+            )
+            """;
+
+    public static final String CREATE_FILTERED_TICKERS = """
+            CREATE TABLE IF NOT EXISTS filtered_tickers (
+              ticker           TEXT PRIMARY KEY,
+              added_at_wall_ms INTEGER NOT NULL,
+              source           TEXT NOT NULL
+            )
+            """;
+
     private SqliteSchema() {
     }
 
@@ -41,6 +64,9 @@ public final class SqliteSchema {
         try (Statement s = c.createStatement()) {
             s.execute(CREATE_QUOTES);
             s.execute(CREATE_HISTORY_INDEX);
+            s.execute(CREATE_TRACKED_SYMBOLS);
+            s.execute(CREATE_ADMIN_REMOVED_SYMBOLS);
+            s.execute(CREATE_FILTERED_TICKERS);
         }
     }
 }

@@ -3,7 +3,6 @@ package io.stream.quotes.store;
 import io.stream.quotes.model.Quote;
 import org.junit.jupiter.api.Test;
 
-import java.math.BigDecimal;
 import java.util.Map;
 import java.util.Optional;
 import java.util.concurrent.CountDownLatch;
@@ -12,6 +11,7 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicLong;
 
+import static io.stream.quotes.support.TestSupport.quote;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
@@ -112,7 +112,4 @@ class LatestQuoteStoreTest {
         assertThat(latest.get().updateId()).isEqualTo(maxIdSeen.get());
     }
 
-    private static Quote quote(String symbol, long updateId) {
-        return new Quote(symbol, BigDecimal.ONE, BigDecimal.ONE, BigDecimal.ONE, BigDecimal.ONE, updateId, 0L);
-    }
 }

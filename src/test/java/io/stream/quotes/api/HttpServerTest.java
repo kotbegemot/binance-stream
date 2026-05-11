@@ -3,24 +3,31 @@ package io.stream.quotes.api;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.stream.quotes.model.Quote;
+import io.stream.quotes.ranking.FilterRules;
+import io.stream.quotes.ranking.SymbolRegistry;
+import io.stream.quotes.store.FilterStore;
 import io.stream.quotes.store.LatestQuoteStore;
 import io.stream.quotes.store.QuoteHistoryReader;
+import io.stream.quotes.store.SqliteConnectionProvider;
 import io.stream.quotes.store.SqliteQuoteWriter;
+import io.stream.quotes.store.TrackedSymbolsStore;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
-import java.math.BigDecimal;
 import java.net.URI;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.nio.file.Path;
+import java.time.Clock;
 import java.time.Duration;
 import java.util.List;
+import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 
+import static io.stream.quotes.support.TestSupport.quote;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.awaitility.Awaitility.await;
 
@@ -29,8 +36,13 @@ class HttpServerTest {
     private LatestQuoteStore store;
     private HttpServer server;
     private HttpClient http;
+    private SqliteConnectionProvider provider;
     private SqliteQuoteWriter writer;
     private QuoteHistoryReader history;
+    private TrackedSymbolsStore symbolsStore;
+    private SymbolRegistry registry;
+    private FilterStore filterStore;
+    private CountDownLatch slowHandlerLatch;
 
     @BeforeEach
     void setUp() {
@@ -40,14 +52,17 @@ class HttpServerTest {
 
     @AfterEach
     void tearDown() {
+        if (slowHandlerLatch != null) {
+            slowHandlerLatch.countDown();
+        }
         if (server != null) {
             server.close();
         }
-        if (history != null) {
-            history.close();
-        }
         if (writer != null) {
             writer.close();
+        }
+        if (provider != null) {
+            provider.close();
         }
     }
 
@@ -56,13 +71,66 @@ class HttpServerTest {
         server.start();
     }
 
-    private void startServerWithHistory(Path tmp, int historyMaxLimit, String... trackedSymbols) throws Exception {
+    private void openProvider(Path tmp) throws Exception {
         String dbPath = tmp.resolve("quotes.db").toString();
-        writer = new SqliteQuoteWriter(dbPath, 100, Duration.ofMillis(20));
+        provider = new SqliteConnectionProvider(dbPath);
+        provider.open();
+    }
+
+    private void startServerWithHistory(Path tmp, int historyMaxLimit, String... trackedSymbols) throws Exception {
+        openProvider(tmp);
+        writer = new SqliteQuoteWriter(provider.quoteWriterConnection(), 100, Duration.ofMillis(20));
         writer.start();
-        history = new QuoteHistoryReader(dbPath);
-        history.open();
-        server = new HttpServer(0, store, List.of(trackedSymbols), history, historyMaxLimit);
+        history = new QuoteHistoryReader(provider.historyReaderConnection());
+        server = new HttpServer(0, store, List.of(trackedSymbols),
+                HttpServerOptions.defaults().withHistory(history, historyMaxLimit));
+        server.start();
+    }
+
+    private void startServerWithFilterAdmin(Path tmp, List<String> seedFilters) throws Exception {
+        openProvider(tmp);
+        filterStore = new FilterStore(provider.filterStoreConnection(), Clock.systemUTC());
+        filterStore.loadInitial(new FilterRules(seedFilters, List.of()));
+        server = new HttpServer(0, store, List.of("BTCUSDT"),
+                HttpServerOptions.defaults().withFilterAdmin(filterStore));
+        server.start();
+    }
+
+    private void startServerWithAdmin(Path tmp, String... initialSymbols) throws Exception {
+        openProvider(tmp);
+        symbolsStore = new TrackedSymbolsStore(provider.trackedSymbolsConnection(), Clock.systemUTC());
+        List<String> initial = symbolsStore.loadInitial(List.of(initialSymbols), "test-seed");
+        registry = new SymbolRegistry();
+        registry.set(initial);
+        server = new HttpServer(0, store, initial,
+                HttpServerOptions.defaults().withSymbolAdmin(symbolsStore, registry));
+        registry.addListener(server::setTrackedSymbols);
+        server.start();
+    }
+
+    private void startServerWithCors(List<String> corsOrigins, String... trackedSymbols) {
+        server = new HttpServer(0, store, List.of(trackedSymbols),
+                HttpServerOptions.defaults().withCorsAllowedOrigins(corsOrigins));
+        server.start();
+    }
+
+    private void startServerWithAdminAndApiKey(Path tmp, String apiKey, String... initialSymbols) throws Exception {
+        openProvider(tmp);
+        symbolsStore = new TrackedSymbolsStore(provider.trackedSymbolsConnection(), Clock.systemUTC());
+        List<String> initial = symbolsStore.loadInitial(List.of(initialSymbols), "test-seed");
+        registry = new SymbolRegistry();
+        registry.set(initial);
+        server = new HttpServer(0, store, initial,
+                HttpServerOptions.defaults()
+                        .withSymbolAdmin(symbolsStore, registry)
+                        .withAdminApiKey(apiKey));
+        registry.addListener(server::setTrackedSymbols);
+        server.start();
+    }
+
+    private void startServerWithTimeout(long timeoutMs, String... trackedSymbols) {
+        server = new HttpServer(0, store, List.of(trackedSymbols),
+                HttpServerOptions.defaults().withHttpAsyncTimeoutMs(timeoutMs));
         server.start();
     }
 
@@ -287,6 +355,359 @@ class HttpServerTest {
         }
     }
 
+    @Test
+    void adminGetSymbolsReturnsInitial(@TempDir Path tmp) throws Exception {
+        startServerWithAdmin(tmp, "BTCUSDT", "ETHUSDT");
+
+        HttpResponse<String> resp = get("/admin/symbols");
+
+        assertThat(resp.statusCode()).isEqualTo(200);
+        ObjectMapper mapper = new ObjectMapper();
+        JsonNode body = mapper.readTree(resp.body());
+        assertThat(body.get("count").asInt()).isEqualTo(2);
+        assertThat(body.get("symbols")).hasSize(2);
+    }
+
+    @Test
+    void adminPutSymbolsReplacesWholeList(@TempDir Path tmp) throws Exception {
+        startServerWithAdmin(tmp, "BTCUSDT", "ETHUSDT");
+
+        HttpResponse<String> resp = sendJson("PUT", "/admin/symbols",
+                "{\"symbols\":[\"BTCUSDT\",\"SOLUSDT\"]}");
+
+        assertThat(resp.statusCode()).isEqualTo(200);
+        ObjectMapper mapper = new ObjectMapper();
+        JsonNode body = mapper.readTree(resp.body());
+        assertThat(body.get("symbols")).hasSize(2);
+        assertThat(body.get("added")).hasSize(1);
+        assertThat(body.get("added").get(0).asText()).isEqualTo("SOLUSDT");
+        assertThat(body.get("removed")).hasSize(1);
+        assertThat(body.get("removed").get(0).asText()).isEqualTo("ETHUSDT");
+    }
+
+    @Test
+    void adminPutWithEmptySymbolsReturns400(@TempDir Path tmp) throws Exception {
+        startServerWithAdmin(tmp, "BTCUSDT");
+
+        HttpResponse<String> resp = sendJson("PUT", "/admin/symbols", "{\"symbols\":[]}");
+
+        assertThat(resp.statusCode()).isEqualTo(400);
+    }
+
+    @Test
+    void adminPutWithInvalidSymbolReturns400(@TempDir Path tmp) throws Exception {
+        startServerWithAdmin(tmp, "BTCUSDT");
+
+        HttpResponse<String> resp = sendJson("PUT", "/admin/symbols", "{\"symbols\":[\"NOPE\"]}");
+
+        assertThat(resp.statusCode()).isEqualTo(400);
+        assertThat(resp.body()).contains("invalid symbol");
+    }
+
+    @Test
+    void adminPatchAddOnlyAdds(@TempDir Path tmp) throws Exception {
+        startServerWithAdmin(tmp, "BTCUSDT");
+
+        HttpResponse<String> resp = sendJson("PATCH", "/admin/symbols", "{\"add\":[\"ETHUSDT\"]}");
+
+        assertThat(resp.statusCode()).isEqualTo(200);
+        ObjectMapper mapper = new ObjectMapper();
+        JsonNode body = mapper.readTree(resp.body());
+        assertThat(body.get("symbols")).hasSize(2);
+        assertThat(body.get("added")).hasSize(1);
+        assertThat(body.get("removed")).isEmpty();
+    }
+
+    @Test
+    void adminPatchRemoveOnlyRemoves(@TempDir Path tmp) throws Exception {
+        startServerWithAdmin(tmp, "BTCUSDT", "ETHUSDT");
+
+        HttpResponse<String> resp = sendJson("PATCH", "/admin/symbols", "{\"remove\":[\"ETHUSDT\"]}");
+
+        assertThat(resp.statusCode()).isEqualTo(200);
+        ObjectMapper mapper = new ObjectMapper();
+        JsonNode body = mapper.readTree(resp.body());
+        assertThat(body.get("symbols")).hasSize(1);
+        assertThat(body.get("symbols").get(0).asText()).isEqualTo("BTCUSDT");
+        assertThat(body.get("removed")).hasSize(1);
+    }
+
+    @Test
+    void adminPatchAddAndRemoveAtomic(@TempDir Path tmp) throws Exception {
+        startServerWithAdmin(tmp, "BTCUSDT", "ETHUSDT");
+
+        HttpResponse<String> resp = sendJson("PATCH", "/admin/symbols",
+                "{\"add\":[\"SOLUSDT\"],\"remove\":[\"ETHUSDT\"]}");
+
+        assertThat(resp.statusCode()).isEqualTo(200);
+        ObjectMapper mapper = new ObjectMapper();
+        JsonNode body = mapper.readTree(resp.body());
+        assertThat(body.get("symbols")).hasSize(2);
+        assertThat(body.get("added").get(0).asText()).isEqualTo("SOLUSDT");
+        assertThat(body.get("removed").get(0).asText()).isEqualTo("ETHUSDT");
+    }
+
+    @Test
+    void adminPatchResultingInEmptyReturns400(@TempDir Path tmp) throws Exception {
+        startServerWithAdmin(tmp, "BTCUSDT");
+
+        HttpResponse<String> resp = sendJson("PATCH", "/admin/symbols", "{\"remove\":[\"BTCUSDT\"]}");
+
+        assertThat(resp.statusCode()).isEqualTo(400);
+        assertThat(resp.body()).contains("empty");
+    }
+
+    @Test
+    void adminPatchUpdatesTrackedSetForLatestEndpoint(@TempDir Path tmp) throws Exception {
+        startServerWithAdmin(tmp, "BTCUSDT");
+
+        HttpResponse<String> before = get("/quotes/latest/ETHUSDT");
+        assertThat(before.statusCode()).isEqualTo(404);
+        assertThat(before.body()).contains("symbol not tracked");
+
+        sendJson("PATCH", "/admin/symbols", "{\"add\":[\"ETHUSDT\"]}");
+
+        HttpResponse<String> after = get("/quotes/latest/ETHUSDT");
+        assertThat(after.statusCode()).isEqualTo(404);
+        assertThat(after.body()).contains("no quote yet");
+    }
+
+    @Test
+    void adminPatchIdempotentAddExistingProducesNoChange(@TempDir Path tmp) throws Exception {
+        startServerWithAdmin(tmp, "BTCUSDT");
+
+        HttpResponse<String> resp = sendJson("PATCH", "/admin/symbols", "{\"add\":[\"BTCUSDT\"]}");
+
+        assertThat(resp.statusCode()).isEqualTo(200);
+        ObjectMapper mapper = new ObjectMapper();
+        JsonNode body = mapper.readTree(resp.body());
+        assertThat(body.get("added")).isEmpty();
+        assertThat(body.get("removed")).isEmpty();
+        assertThat(body.get("symbols")).hasSize(1);
+    }
+
+    @Test
+    void adminEndpointsAreNotRegisteredWithoutAdminContext() throws Exception {
+        startServer("BTCUSDT");
+
+        HttpResponse<String> resp = get("/admin/symbols");
+
+        assertThat(resp.statusCode()).isEqualTo(404);
+    }
+
+    @Test
+    void adminGetFiltersReturnsSeed(@TempDir Path tmp) throws Exception {
+        startServerWithFilterAdmin(tmp, List.of("USDT", "USDC"));
+
+        HttpResponse<String> resp = get("/admin/filters");
+
+        assertThat(resp.statusCode()).isEqualTo(200);
+        ObjectMapper mapper = new ObjectMapper();
+        JsonNode body = mapper.readTree(resp.body());
+        assertThat(body.get("count").asInt()).isEqualTo(2);
+        assertThat(body.get("filtered")).hasSize(2);
+    }
+
+    @Test
+    void adminPutFiltersReplacesWholeSet(@TempDir Path tmp) throws Exception {
+        startServerWithFilterAdmin(tmp, List.of("USDT", "USDC"));
+
+        HttpResponse<String> resp = sendJson("PUT", "/admin/filters",
+                "{\"filtered\":[\"USDT\",\"DAI\"]}");
+
+        assertThat(resp.statusCode()).isEqualTo(200);
+        ObjectMapper mapper = new ObjectMapper();
+        JsonNode body = mapper.readTree(resp.body());
+        assertThat(body.get("filtered")).hasSize(2);
+        assertThat(body.get("added")).hasSize(1);
+        assertThat(body.get("added").get(0).asText()).isEqualTo("DAI");
+        assertThat(body.get("removed")).hasSize(1);
+        assertThat(body.get("removed").get(0).asText()).isEqualTo("USDC");
+    }
+
+    @Test
+    void adminPutFiltersAcceptsEmptyArray(@TempDir Path tmp) throws Exception {
+        startServerWithFilterAdmin(tmp, List.of("USDT"));
+
+        HttpResponse<String> resp = sendJson("PUT", "/admin/filters", "{\"filtered\":[]}");
+
+        assertThat(resp.statusCode()).isEqualTo(200);
+        ObjectMapper mapper = new ObjectMapper();
+        JsonNode body = mapper.readTree(resp.body());
+        assertThat(body.get("count").asInt()).isZero();
+    }
+
+    @Test
+    void adminPatchFiltersAddRemoveAtomic(@TempDir Path tmp) throws Exception {
+        startServerWithFilterAdmin(tmp, List.of("USDT"));
+
+        HttpResponse<String> resp = sendJson("PATCH", "/admin/filters",
+                "{\"add\":[\"WBTC\",\"DAI\"],\"remove\":[\"USDT\"]}");
+
+        assertThat(resp.statusCode()).isEqualTo(200);
+        ObjectMapper mapper = new ObjectMapper();
+        JsonNode body = mapper.readTree(resp.body());
+        assertThat(body.get("filtered")).hasSize(2);
+        assertThat(body.get("added")).hasSize(2);
+        assertThat(body.get("removed")).hasSize(1);
+    }
+
+    @Test
+    void adminFiltersInvalidTickerReturns400(@TempDir Path tmp) throws Exception {
+        startServerWithFilterAdmin(tmp, List.of("USDT"));
+
+        HttpResponse<String> resp = sendJson("PATCH", "/admin/filters",
+                "{\"add\":[\"bad-ticker\"]}");
+
+        assertThat(resp.statusCode()).isEqualTo(400);
+        assertThat(resp.body()).contains("invalid ticker");
+    }
+
+    @Test
+    void adminRequiresKeyWhenConfigured(@TempDir Path tmp) throws Exception {
+        startServerWithAdminAndApiKey(tmp, "secret-key", "BTCUSDT");
+
+        HttpResponse<String> resp = get("/admin/symbols");
+
+        assertThat(resp.statusCode()).isEqualTo(401);
+        assertThat(resp.body()).contains("X-Admin-Key");
+    }
+
+    @Test
+    void adminAcceptsCorrectKey(@TempDir Path tmp) throws Exception {
+        startServerWithAdminAndApiKey(tmp, "secret-key", "BTCUSDT");
+
+        HttpResponse<String> resp = http.send(
+                HttpRequest.newBuilder()
+                        .uri(URI.create("http://localhost:" + server.actualPort() + "/admin/symbols"))
+                        .header("X-Admin-Key", "secret-key")
+                        .GET()
+                        .build(),
+                HttpResponse.BodyHandlers.ofString());
+
+        assertThat(resp.statusCode()).isEqualTo(200);
+    }
+
+    @Test
+    void adminRejectsWrongKey(@TempDir Path tmp) throws Exception {
+        startServerWithAdminAndApiKey(tmp, "secret-key", "BTCUSDT");
+
+        HttpResponse<String> resp = http.send(
+                HttpRequest.newBuilder()
+                        .uri(URI.create("http://localhost:" + server.actualPort() + "/admin/symbols"))
+                        .header("X-Admin-Key", "wrong")
+                        .GET()
+                        .build(),
+                HttpResponse.BodyHandlers.ofString());
+
+        assertThat(resp.statusCode()).isEqualTo(401);
+    }
+
+    @Test
+    void adminMutationRequiresKeyWhenConfigured(@TempDir Path tmp) throws Exception {
+        startServerWithAdminAndApiKey(tmp, "secret-key", "BTCUSDT");
+
+        HttpResponse<String> resp = sendJson("PATCH", "/admin/symbols",
+                "{\"add\":[\"ETHUSDT\"]}");
+
+        assertThat(resp.statusCode()).isEqualTo(401);
+    }
+
+    @Test
+    void corsAllowsConfiguredOrigin() throws Exception {
+        startServerWithCors(List.of("https://app.example.com"), "BTCUSDT");
+
+        HttpResponse<String> resp = http.send(
+                HttpRequest.newBuilder()
+                        .uri(URI.create("http://localhost:" + server.actualPort() + "/quotes/latest"))
+                        .header("Origin", "https://app.example.com")
+                        .GET()
+                        .build(),
+                HttpResponse.BodyHandlers.ofString());
+
+        assertThat(resp.statusCode()).isEqualTo(200);
+        assertThat(resp.headers().firstValue("access-control-allow-origin"))
+                .hasValue("https://app.example.com");
+    }
+
+    @Test
+    void corsOmitsHeaderForUnknownOrigin() throws Exception {
+        startServerWithCors(List.of("https://app.example.com"), "BTCUSDT");
+
+        HttpResponse<String> resp = http.send(
+                HttpRequest.newBuilder()
+                        .uri(URI.create("http://localhost:" + server.actualPort() + "/quotes/latest"))
+                        .header("Origin", "https://evil.example.com")
+                        .GET()
+                        .build(),
+                HttpResponse.BodyHandlers.ofString());
+
+        // Server still answers (CORS is a browser-side enforcement) but
+        // does not send the Access-Control-Allow-Origin header → browser
+        // would block the response. That absence is the test.
+        assertThat(resp.headers().firstValue("access-control-allow-origin"))
+                .isEmpty();
+    }
+
+    @Test
+    void corsDisabledByDefaultEmitsNoHeader() throws Exception {
+        startServer("BTCUSDT");
+
+        HttpResponse<String> resp = http.send(
+                HttpRequest.newBuilder()
+                        .uri(URI.create("http://localhost:" + server.actualPort() + "/quotes/latest"))
+                        .header("Origin", "https://any.example.com")
+                        .GET()
+                        .build(),
+                HttpResponse.BodyHandlers.ofString());
+
+        assertThat(resp.headers().firstValue("access-control-allow-origin"))
+                .isEmpty();
+    }
+
+    @Test
+    void slowAsyncHandlerHitsAsyncTimeout() throws Exception {
+        slowHandlerLatch = new CountDownLatch(1);
+        startServerWithTimeout(80, "BTCUSDT");
+        server.registerTestRouteAsync("/slow",
+                () -> slowHandlerLatch.await(5, TimeUnit.SECONDS));
+
+        HttpResponse<String> resp = get("/slow");
+
+        // Timeout path: runAsync.exceptionally maps TimeoutException to 408.
+        assertThat(resp.statusCode()).isEqualTo(408);
+    }
+
+    @Test
+    void fastAsyncHandlerCompletesBeforeTimeout() throws Exception {
+        startServerWithTimeout(2_000, "BTCUSDT");
+        server.registerTestRouteAsync("/fast", () -> Thread.sleep(30));
+
+        HttpResponse<String> resp = get("/fast");
+
+        assertThat(resp.statusCode()).isEqualTo(200);
+        assertThat(resp.body()).isEqualTo("done");
+    }
+
+    @Test
+    void adminFilterEndpointsAbsentWithoutFilterStore() throws Exception {
+        startServer("BTCUSDT");
+
+        HttpResponse<String> resp = get("/admin/filters");
+
+        assertThat(resp.statusCode()).isEqualTo(404);
+    }
+
+    private HttpResponse<String> sendJson(String method, String path, String body) throws Exception {
+        return http.send(
+                HttpRequest.newBuilder()
+                        .uri(URI.create("http://localhost:" + server.actualPort() + path))
+                        .method(method, HttpRequest.BodyPublishers.ofString(body))
+                        .header("Content-Type", "application/json")
+                        .build(),
+                HttpResponse.BodyHandlers.ofString());
+    }
+
     private HttpResponse<String> get(String path) throws Exception {
         return http.send(
                 HttpRequest.newBuilder()
@@ -296,11 +717,4 @@ class HttpServerTest {
                 HttpResponse.BodyHandlers.ofString());
     }
 
-    private static Quote quote(String symbol, long updateId, String bid, String bidSize,
-                                String ask, String askSize, long receivedAtMs) {
-        return new Quote(symbol,
-                new BigDecimal(bid), new BigDecimal(bidSize),
-                new BigDecimal(ask), new BigDecimal(askSize),
-                updateId, receivedAtMs);
-    }
 }

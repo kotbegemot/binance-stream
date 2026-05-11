@@ -35,8 +35,8 @@ public record HistoryQueryParams(long fromMs, long toMs, int limit) {
         }
     }
 
-    public static final class BadParamException extends RuntimeException {
-        public BadParamException(String message) {
+    static final class BadParamException extends RuntimeException {
+        BadParamException(String message) {
             super(message);
         }
     }

@@ -7,7 +7,6 @@ import org.yaml.snakeyaml.Yaml;
 import java.io.IOException;
 import java.io.InputStream;
 import java.util.ArrayList;
-import java.util.Collections;
 import java.util.List;
 import java.util.Map;
 
@@ -69,7 +68,7 @@ public final class StaticRanker implements InstrumentRanker {
     @SuppressWarnings("unchecked")
     private static List<String> asStringList(Object value) {
         if (value == null) {
-            return Collections.emptyList();
+            return List.of();
         }
         if (!(value instanceof List<?> list)) {
             throw new IllegalStateException("expected list, got " + value.getClass());

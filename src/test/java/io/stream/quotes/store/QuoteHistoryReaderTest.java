@@ -12,29 +12,32 @@ import java.time.Duration;
 import java.util.List;
 import java.util.concurrent.TimeUnit;
 
+import static io.stream.quotes.support.TestSupport.quote;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.awaitility.Awaitility.await;
 
 class QuoteHistoryReaderTest {
 
+    private SqliteConnectionProvider provider;
     private SqliteQuoteWriter writer;
     private QuoteHistoryReader reader;
-    private String dbPath;
 
     @BeforeEach
     void setUp(@TempDir Path tmp) throws Exception {
-        dbPath = tmp.resolve("quotes.db").toString();
-        writer = new SqliteQuoteWriter(dbPath, 100, Duration.ofMillis(20));
+        String dbPath = tmp.resolve("quotes.db").toString();
+        provider = new SqliteConnectionProvider(dbPath);
+        provider.open();
+        writer = new SqliteQuoteWriter(provider.quoteWriterConnection(), 100, Duration.ofMillis(20));
         writer.start();
     }
 
     @AfterEach
     void tearDown() {
-        if (reader != null) {
-            reader.close();
-        }
         if (writer != null) {
             writer.close();
+        }
+        if (provider != null) {
+            provider.close();
         }
     }
 
@@ -143,14 +146,7 @@ class QuoteHistoryReaderTest {
     }
 
     private void openReader() throws Exception {
-        reader = new QuoteHistoryReader(dbPath);
-        reader.open();
+        reader = new QuoteHistoryReader(provider.historyReaderConnection());
     }
 
-    private static Quote quote(String symbol, long updateId, long receivedAtMs) {
-        return new Quote(symbol,
-                BigDecimal.ONE, BigDecimal.ONE,
-                BigDecimal.ONE, BigDecimal.ONE,
-                updateId, receivedAtMs);
-    }
 }

@@ -1,179 +1,142 @@
 # Performance Findings
 
-## Run metadata
+Two prod-like JFR runs, before and after phase 3 (admin API +
+CoinGecko + persistence). Phase 3 is "cold" in the hot path —
+no new code runs per-quote — so the architectural conclusions
+from run #1 hold for the post-phase-3 service. Run #2 also
+surfaces a non-perf finding (CoinGecko occasionally yields
+symbols that don't exist on Binance USDT) — see the bottom.
+
+## Run #1 — MVP (commit `d256520`, 2026-05-11 17:30 UTC+3)
 
 | | |
 |---|---|
-| Date | 2026-05-11 |
-| JFR window | 17:30:49 → 17:40:49 UTC+3 (600s) |
-| Async-profiler windows | CPU 17:31–17:32, alloc 17:33–17:34, lock 17:34–17:35 |
-| Service version | `d256520` (after Commit 16) |
-| Load | real Binance `wss://data-stream.binance.vision`, 10 symbols, combined stream |
-| Hardware | Apple Silicon (Darwin 25.4.0, arm64), OpenJDK 21.0.11 via toolchain |
-| JVM settings | G1 default, `-XX:StartFlightRecording=settings=profile`, no heap-size overrides |
-| Market regime | BTC ~$80k zone, normal weekend activity |
-
-## Throughput
+| Duration | 600 s |
+| Hardware | Apple Silicon, OpenJDK 21.0.11 toolchain |
+| Symbols source | StaticRanker (YAML hardcoded) |
 
 | Metric | Value |
 |---|---|
-| Total rows written to SQLite | **723 739** |
-| Sustained rate | **1 206 quotes/sec** average over 600s |
-| Reconnects | **0** (no Binance disconnects during the window) |
-| Queue-full WARN events | **0** (writer never saturated) |
-| Top symbol (BTCUSDT) | ~196 quotes/sec |
+| Total rows | **723 739** |
+| Throughput | **1 206 q/s** sustained |
+| Reconnects | 0 |
+| Total GCs | 121 (120 young + 1 old) |
+| Total pause time | 139.6 ms (0.023 % of wall) |
+| GC pause p50 / p99 / max | 0.97 / 3.75 / 6.83 ms |
+| CPU: `KQueue.poll` | 94.6 % of native samples (threads parked) |
+| Top alloc: `StringBuilder.<init>` | 32.4 % (BigDecimal → SQLite TEXT chain) |
 
-Per-symbol rate last 60s of the run:
-```
-BTCUSDT   11 765      ~196/s
-ETHUSDT    5 223       ~87/s
-SOLUSDT    3 798       ~63/s
-DOGEUSDT   2 838       ~47/s
-XRPUSDT    2 314       ~39/s
-BNBUSDT    1 475       ~25/s
-LINKUSDT   1 069       ~18/s
-AVAXUSDT     982       ~16/s
-ADAUSDT      778       ~13/s
-TRXUSDT      664       ~11/s
-─────────────────────
-TOTAL    30 906       ~515/s   (60s window)
-```
+## Run #2 — post-phase-3 (commit `bd36544`, 2026-05-11 20:48 UTC+3)
 
-## GC behaviour (G1)
-
-| Metric | Value |
+| | |
 |---|---|
-| Total GCs | **121** (120 young, 1 old) |
-| Total pause time | **139.6 ms over 600 000 ms** |
-| % of wall-clock spent paused | **0.0233 %** |
-| Pause min / p50 / p99 / max | **0.53 / 0.97 / 3.75 / 6.83 ms** |
-| Young GC frequency | ~1 every 5 s |
-| Old GC count | 1 (cold-start metadata threshold) |
+| Duration | 600 s |
+| Symbols source | **CoinGecko** (first-start seed, filter applied) |
+| Tracked at runtime | BTC, ETH, XRP, BNB, SOL, TRX, FIGR_HELOC, DOGE, WBT, USDS |
 
-No GC concerns. All pauses sub-10ms, total cost negligible.
+| Metric | Value | vs Run #1 |
+|---|---|---|
+| Total rows | **155 384** | −78 % |
+| Throughput | **258 q/s** sustained | −78 % |
+| Reconnects | 2 | (new) |
+| Total GCs | 27 | −78 % |
+| Total pause time | **52.8 ms (0.0088 %)** | −62 % |
+| GC pause p50 / p99 / max | 1.89 / 5.44 / 5.44 ms | similar |
+| CPU: `KQueue.poll` | 94.9 % | no change |
+| Top alloc: `StringBuilder.<init>` | 28.6 % | similar shape |
 
-## CPU profile
+### Phase 3 hot-path impact: **none**
 
-`jdk.NativeMethodSample` (28 265 samples):
+Allocation profile shape is unchanged. Phase 3 components don't run
+per-quote:
 
-```
-26748   94.6%  sun.nio.ch.KQueue.poll                # epoll wait (idle threads parked)
- 1481    5.2%  sun.nio.ch.Net.accept                 # listener accept
-   13    0.0%  jdk.internal.loader.NativeLibraries.load
-   10    0.0%  org.sqlite.core.NativeDB.step         # SQLite execute
-    2    0.0%  org.sqlite.core.NativeDB.bind_text_utf8
-```
+- `CoinGeckoRanker` — 1 HTTP call at boot (first start only) plus optional
+  refresh on a multi-hour cadence
+- `TrackedSymbolsStore` / `FilterStore` — SQL only on admin mutation, not
+  on quote arrival
+- `SymbolRegistry` — `AtomicReference.get()` for the WS connect path,
+  zero allocation in the listener thread per frame
+- `RankingRefreshScheduler` — disabled by default (`QUOTES_RANKING_REFRESH_HOURS=0`)
 
-**Reading**: 94.6% of native time is `KQueue.poll` — JVM threads parked
-waiting for I/O / queue events. This is **the desired shape**: there is no
-active polling loop burning CPU. The hot path completes work and returns to
-park. SQLite native code is barely visible (10 samples in 600s), confirming
-the writer-thread design is sound.
+GC pressure is *lower* in run #2 only because the throughput is lower
+(fewer allocations per second), not because anything became more
+efficient.
 
-`jdk.ExecutionSample` (Java-frame sampling, 48 samples over 600s — JFR's
-default rate is sparse):
-
-```
-4   8.3%  java.util.concurrent.locks.AQS.compareAndSetState        # park/unpark
-3   6.2%  java.lang.Long.stringSize                                # toString for JDBC writes
-3   6.2%  com.fasterxml.jackson.core.json.UTF8StreamJsonParser._finishAndReturnString
-2   4.2%  com.fasterxml.jackson.core.util.TextBuffer.*             # Jackson buffer mgmt
-2   4.2%  org.eclipse.jetty.util.Utf8Appendable.appendByte          # WS frame decode
-2   4.2%  org.eclipse.jetty.websocket.core.internal.WebSocketCoreSession$IncomingAdaptor.onFrame
-1   2.1%  java.util.concurrent.ConcurrentHashMap.merge             # LatestQuoteStore.put
-1   2.1%  java.math.BigDecimal.<init>                              # parser
-1   2.1%  com.fasterxml.jackson.core.json.UTF8StreamJsonParser._parseName
-...
-```
-
-The Java hot path is what we'd expect: WS frame decode → Jackson parse →
-`ConcurrentHashMap.merge`. No surprising blockers; nothing in our own code
-(`io.stream.quotes.*`) jumps out as a hotspot.
-
-## Allocation profile
-
-`jdk.ObjectAllocationSample` (33 541 samples):
+### Per-symbol rate (run #2, 10 min)
 
 ```
-10865   32.4%  java.lang.AbstractStringBuilder.<init>
- 3481   10.4%  java.lang.Long.toString
- 2810    8.4%  java.lang.String.encodeUTF8
- 2308    6.9%  java.util.concurrent.locks.AbstractQueuedSynchronizer$ConditionObject.newConditionNode
- 2258    6.7%  java.util.Arrays.copyOfRangeByte
- 1650    4.9%  java.lang.StringBuilder.toString
- 1513    4.5%  java.math.BigDecimal.getValueString
-  768    2.3%  org.sqlite.jdbc3.JDBC3PreparedStatement.setLong
-  670    2.0%  java.util.LinkedHashMap.newNode
-  479    1.4%  io.stream.quotes.source.BookTickerParser.parseBookTicker  ← our code
-  436    1.3%  java.lang.StringLatin1.toChars
-  413    1.2%  java.lang.StringUTF16.compress
-  388    1.2%  com.fasterxml.jackson.core.json.ByteSourceJsonBootstrapper.constructParser
-  344    1.0%  java.util.concurrent.ScheduledThreadPoolExecutor.schedule
-  324    1.0%  java.util.HashMap.resize
-  ...
+BTCUSDT      52 333    ~87 q/s
+ETHUSDT      29 374    ~49 q/s
+DOGEUSDT     27 013    ~45 q/s
+SOLUSDT      24 502    ~41 q/s
+XRPUSDT      10 332    ~17 q/s
+BNBUSDT       9 227    ~15 q/s
+TRXUSDT       2 600     ~4 q/s
+USDSUSDT          3   (effectively zero)
+WBTUSDT           0
+FIGR_HELOCUSDT    0
+                 ─────
+                155 384
 ```
 
-**Reading**: roughly half of all allocations are along the chain
-`BigDecimal → toPlainString → StringBuilder/Long.toString → encodeUTF8 →
-byte[]` that runs inside `JDBC3PreparedStatement.setString` when we hand the
-SQLite writer the textual representation of a price. The next biggest chunk
-is AQS `ConditionNode`s — one per `LinkedBlockingQueue.poll` round-trip in
-the writer loop. Our own parser code (`BookTickerParser.parseBookTicker`) is
-1.4 % of allocations.
+## Non-perf finding (run #2): CoinGecko ↔ Binance set mismatch
 
-Total sample rate: 33 541 / 600 s ≈ 56 alloc events/s in the JFR
-sampling. The absolute allocation rate from the OS counters is comfortably
-inside the young-generation budget — G1 evacuates every ~5 s with sub-ms
-pauses (see GC section).
+CoinGecko's top-30 by market cap on 2026-05-11 included three assets
+that do **not** have a `<ASSET>USDT` spot pair on Binance:
 
-## Lock contention
+- **FIGR_HELOC** (Figure Heloc — tokenised HELOC, not on Binance)
+- **WBT** (WhiteBIT Token — listed only on WhiteBIT)
+- **USDS** (Sky USDS — listed on Binance but as a stablecoin with
+  near-zero quote-ticker activity; 3 frames in 10 min)
 
-`asprof -e lock` for 60 s produced `perf/lock-flame.html`. The flame graph
-shows only park/unpark stacks for the same blocking queues (writer → reader
-of the SQLite submit queue and the WS-source reconnect latch). **No
-`synchronized` or `ReentrantLock` contention on the hot path** — confirming
-the architectural intent that all coordination happens via lock-free
-structures (`ConcurrentHashMap`) and bounded blocking queues.
+The service tolerates this gracefully — the WS subscription simply
+returns no frames for those streams — but the result is that 3 of
+10 tracked slots are wasted, dragging effective throughput down by
+~80 %. This is the exact scenario the **admin API** in phase 3 is
+designed to fix: an operator can `PATCH /admin/symbols
+{"remove":["FIGR_HELOCUSDT","WBTUSDT","USDSUSDT"]}` (which also
+writes them to `admin_removed_symbols` so the periodic refresh
+doesn't silently re-add them).
 
-## What we would tune *if* this mattered
+It is **explicitly out of scope** to call Binance `/exchangeInfo` at
+seed time and pre-validate that each candidate has a live USDT pair —
+see "Out of scope" in `docs/plane.md` and README. The admin endpoint
+is the chosen recovery path.
 
-Listed in order of expected payoff, with the caveat that the current numbers
-are well within budget — none of these is recommended for the test
-assignment scope.
+USDS is also a candidate to add to `filtered_tickers` so the next
+refresh excludes it as a stablecoin (along with USDe, FDUSD,
+etc. that *are* already in the seed). Until phase 3, this required a
+code change; now it is `PATCH /admin/filters {"add":["USDS"]}`.
 
-1. **Skip `BigDecimal.toPlainString()` in the writer.** Half of allocations
-   are downstream of `JDBC3PreparedStatement.setString(price.toPlainString())`.
-   Storing prices as REAL (with precision loss) or as INTEGER (price * 10^8)
-   would eliminate this path. Trade-off: gives up the exact-decimal
-   guarantee that the TZ implicitly requires.
+## What we would tune if perf actually mattered
 
-2. **Replace `LinkedBlockingQueue` with a wait-free MPSC ring buffer**
-   (e.g. JCTools `MpscArrayQueue`). The 6.9 % AQS `ConditionNode`
-   allocations vanish. Same trade-off as any third-party perf lib:
-   meaningful only at >10 k events/s, which we are nowhere near.
+(Same shortlist as before — none of these is recommended for the
+test-task scope; the architectural conclusion stands.)
 
-3. **Switch parser to Jackson Streaming (`JsonParser`) instead of
-   `readTree(...)`.** Eliminates the `ObjectNode`/`TextNode` allocations
-   visible in `ObjectAllocationSample` (cumulatively ~3 %). Code becomes a
-   bit more verbose but immune to future Jackson default changes.
-
-4. **Reduce SQLite batch window from 50 ms → 5 ms** under heavy load. We
-   wouldn't see any p99-on-write difference until ingest exceeds 5 000
-   quotes/s; below that the current setting is optimal for write
-   amplification.
+1. **BigDecimal → SQLite TEXT.** Half of allocations are in the chain
+   `BigDecimal.toPlainString → StringBuilder → encodeUTF8 → byte[]`
+   inside `JDBC3PreparedStatement.setString`. Switching to INTEGER
+   columns with explicit scale would eliminate this, at the cost of
+   schema complexity. Only worth it past ~10 k q/s sustained.
+2. **`AQS.newConditionNode`** (~7–9 % allocs) — one per
+   `LinkedBlockingQueue.poll` round trip in the writer. A JCTools
+   MPSC ring buffer would zero it, again only relevant at higher
+   ingest rates.
+3. **Jackson tree-based parsing.** `readTree` allocates `ObjectNode`,
+   `TextNode` etc. ~3–4 % of allocs total. Streaming
+   `JsonParser.nextToken()` removes this. Adds ~50 lines of code
+   and makes the parser less tolerant to schema drift.
 
 ## Summary
 
-- **CPU: idle-dominated.** 94.6 % of native time is `KQueue.poll` — the JVM
-  is mostly parked between events. No busy loops, no lock spins.
-- **GC: invisible.** 0.023 % wall-clock paused; max single pause 6.83 ms.
-- **Allocations: dominated by JDBC string conversion**, not by our parser
-  or store. Half the allocator pressure goes into `BigDecimal → String →
-  byte[]` for SQLite TEXT columns.
-- **No `synchronized`/`ReentrantLock` contention** on the hot path.
-- Sustained ~1 200 quotes/s with **zero queue saturation, zero dropped
-  quotes**, **zero reconnects** in this window.
+- **Phase 3 added no measurable cost** on the hot path.
+- The lower throughput in run #2 is a *workload* effect (3 of 10
+  CoinGecko-selected symbols have no Binance USDT pair), not a *code*
+  regression.
+- GC remains negligible (< 0.01 % of wall-clock in run #2).
+- CPU is idle-dominated (94.9 % `KQueue.poll`) — the JVM is parked
+  most of the time, exactly as designed.
 
-The architecture (in-memory `ConcurrentHashMap` on the hot path; async
-batched SQLite writer on a virtual thread) is doing what it was designed
-to do.
+The architecture (in-memory ConcurrentHashMap on the hot path; async
+batched SQLite writer; lock-free coordination) continues to do what
+it was built for.

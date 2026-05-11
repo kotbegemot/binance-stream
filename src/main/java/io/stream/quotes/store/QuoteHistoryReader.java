@@ -1,9 +1,6 @@
 package io.stream.quotes.store;
 
 import io.stream.quotes.model.Quote;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
-import org.sqlite.SQLiteConfig;
 
 import java.math.BigDecimal;
 import java.sql.Connection;
@@ -12,10 +9,10 @@ import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Objects;
 
 public final class QuoteHistoryReader implements AutoCloseable {
 
-    private static final Logger log = LoggerFactory.getLogger(QuoteHistoryReader.class);
     private static final String SELECT_SQL = """
             SELECT symbol, update_id, bid, bid_size, ask, ask_size, received_at_wall_ms
             FROM quotes
@@ -26,27 +23,13 @@ public final class QuoteHistoryReader implements AutoCloseable {
             LIMIT ?
             """;
 
-    private final String dbPath;
-    private Connection connection;
+    private final Connection connection;
 
-    public QuoteHistoryReader(String dbPath) {
-        this.dbPath = dbPath;
-    }
-
-    public synchronized void open() throws SQLException {
-        if (connection != null) {
-            return;
-        }
-        SQLiteConfig cfg = new SQLiteConfig();
-        cfg.setReadOnly(true);
-        connection = cfg.createConnection("jdbc:sqlite:" + dbPath);
-        log.info("history reader opened on {}", dbPath);
+    public QuoteHistoryReader(Connection connection) {
+        this.connection = Objects.requireNonNull(connection, "connection");
     }
 
     public List<Quote> read(String symbol, long fromMs, long toMs, int limit) throws SQLException {
-        if (connection == null) {
-            throw new IllegalStateException("reader not opened");
-        }
         try (PreparedStatement stmt = connection.prepareStatement(SELECT_SQL)) {
             stmt.setString(1, symbol);
             stmt.setLong(2, fromMs);
@@ -70,15 +53,11 @@ public final class QuoteHistoryReader implements AutoCloseable {
         }
     }
 
+    /**
+     * No-op: this reader does not own the underlying Connection — the
+     * {@link SqliteConnectionProvider} does.
+     */
     @Override
-    public synchronized void close() {
-        if (connection != null) {
-            try {
-                connection.close();
-            } catch (SQLException e) {
-                log.warn("error closing history reader", e);
-            }
-            connection = null;
-        }
+    public void close() {
     }
 }

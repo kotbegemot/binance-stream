@@ -52,3 +52,28 @@ tasks.jacocoTestReport {
         xml.required = true
     }
 }
+
+// Run the service with Java Flight Recorder enabled. Captures a .jfr profile
+// to perf/quotes-service.jfr for the configured duration (default 600s).
+// Override via -PjfrDurationSec=300, -PjfrFile=perf/run-2.jfr, -PjfrSettings=default.
+tasks.register<JavaExec>("runWithJfr") {
+    group = "application"
+    description = "Run the service with Java Flight Recorder enabled (perf profile)."
+    classpath = sourceSets["main"].runtimeClasspath
+    mainClass.set("io.stream.quotes.Main")
+
+    val durationSec = (project.findProperty("jfrDurationSec") as String?) ?: "600"
+    val file = (project.findProperty("jfrFile") as String?) ?: "perf/quotes-service.jfr"
+    val settings = (project.findProperty("jfrSettings") as String?) ?: "profile"
+
+    doFirst {
+        file("perf").mkdirs()
+    }
+
+    jvmArgs(
+        "-XX:StartFlightRecording=" +
+            "filename=$file,duration=${durationSec}s,settings=$settings,name=quotes-service",
+        "-XX:+UnlockDiagnosticVMOptions",
+        "-XX:+DebugNonSafepoints"
+    )
+}

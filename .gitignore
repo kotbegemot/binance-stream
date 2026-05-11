@@ -45,3 +45,8 @@ bin/
 *.db-shm
 /data/
 .env
+
+### Performance artefacts ###
+# JFR recordings are large (50-100MB) — commit findings.md + text
+# summaries instead; raw .jfr only on demand.
+*.jfr

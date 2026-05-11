@@ -1,0 +1,34 @@
+# Top-10 fallback snapshot as of 2026-05-11
+# Curated list — stablecoins and wrapped/staked derivatives already excluded.
+# Source: CoinGecko market_cap_desc (non-stablecoin, non-wrapped), mapped to Binance USDT pairs.
+symbols:
+  - BTCUSDT
+  - ETHUSDT
+  - SOLUSDT
+  - XRPUSDT
+  - BNBUSDT
+  - DOGEUSDT
+  - TRXUSDT
+  - ADAUSDT
+  - LINKUSDT
+  - AVAXUSDT
+
+# Filter rules — used by dynamic rankers (e.g. CoinGeckoRanker) to exclude
+# asset tickers before mapping to Binance pairs. Tickers are case-insensitive.
+stablecoin_filter:
+  - USDT
+  - USDC
+  - DAI
+  - FDUSD
+  - USDe
+  - PYUSD
+  - TUSD
+  - USDD
+
+wrapped_filter:
+  - WBTC
+  - WETH
+  - stETH
+  - WSTETH
+  - cbBTC
+  - rETH

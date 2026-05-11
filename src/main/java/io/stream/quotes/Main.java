@@ -43,7 +43,7 @@ public final class Main {
         QuotePipeline pipeline = new QuotePipeline(source, store, writer);
         pipeline.start();
 
-        HttpServer http = new HttpServer(config.httpPort(), store);
+        HttpServer http = new HttpServer(config.httpPort(), store, symbols);
         http.start();
 
         Runtime.getRuntime().addShutdownHook(new Thread(() -> {

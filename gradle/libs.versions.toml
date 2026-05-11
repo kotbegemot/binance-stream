@@ -1,0 +1,24 @@
+[versions]
+java = "21"
+javalin = "6.1.6"
+jetty = "11.0.20"
+jackson = "2.17.2"
+snakeyaml = "2.2"
+sqlite = "3.46.0.0"
+slf4j = "2.0.13"
+logback = "1.5.6"
+junit = "5.10.3"
+assertj = "3.26.0"
+
+[libraries]
+javalin = { module = "io.javalin:javalin", version.ref = "javalin" }
+jetty-websocket-jetty-client = { module = "org.eclipse.jetty.websocket:websocket-jetty-client", version.ref = "jetty" }
+jackson-databind = { module = "com.fasterxml.jackson.core:jackson-databind", version.ref = "jackson" }
+snakeyaml = { module = "org.yaml:snakeyaml", version.ref = "snakeyaml" }
+sqlite-jdbc = { module = "org.xerial:sqlite-jdbc", version.ref = "sqlite" }
+slf4j-api = { module = "org.slf4j:slf4j-api", version.ref = "slf4j" }
+logback-classic = { module = "ch.qos.logback:logback-classic", version.ref = "logback" }
+junit-bom = { module = "org.junit:junit-bom", version.ref = "junit" }
+junit-jupiter = { module = "org.junit.jupiter:junit-jupiter" }
+junit-platform-launcher = { module = "org.junit.platform:junit-platform-launcher" }
+assertj-core = { module = "org.assertj:assertj-core", version.ref = "assertj" }

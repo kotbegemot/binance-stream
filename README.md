@@ -41,11 +41,14 @@ toolchain on first build if you only have a newer one installed).
 
 ## API
 
-A single endpoint exposing the in-memory "latest by symbol" snapshot:
+All endpoints return JSON. Prices and sizes are serialised as **strings** to
+preserve `BigDecimal` precision through JSON; field names follow `snake_case`
+to match the task description. `received_at_ms` is the wall-clock time at
+which the frame arrived at this service.
+
+### `GET /quotes/latest` — all latest
 
 ```
-GET /quotes/latest
-→ 200 OK, application/json
 [
   {
     "symbol": "BTCUSDT",
@@ -59,11 +62,45 @@ GET /quotes/latest
 ]
 ```
 
-Field names follow the `snake_case` from the task description. Prices and
-sizes are serialised as **strings** to preserve `BigDecimal` precision through
-JSON. Symbols that have not yet received a quote (cold start) simply do not
-appear in the array. `received_at_ms` is the wall‑clock time at which the
-frame arrived at this service.
+Symbols that have not yet received a quote do not appear.
+
+### `GET /quotes/latest/{symbol}` — single latest
+
+```
+GET /quotes/latest/BTCUSDT   → 200 OK, single object as above
+GET /quotes/latest/UNKNOWN   → 404 {"error":"symbol not tracked","symbol":"UNKNOWN"}
+GET /quotes/latest/BTCUSDT   → 404 {"error":"no quote yet","symbol":"BTCUSDT"} during cold-start
+```
+
+Path param is case-insensitive (`/quotes/latest/btcusdt` works).
+
+### `GET /quotes/{symbol}/history` — history from SQLite
+
+```
+GET /quotes/BTCUSDT/history                                # default limit=100, all time
+GET /quotes/BTCUSDT/history?limit=500
+GET /quotes/BTCUSDT/history?from=1715472000000&to=1715475600000
+GET /quotes/BTCUSDT/history?from=1715472000000&limit=2000
+```
+
+- **Response**: same JSON array shape as `/quotes/latest`, sorted by
+  `received_at_ms DESC` (most recent first).
+- **`limit`**: default 100. Cap is `QUOTES_HISTORY_MAX_LIMIT` (default
+  10 000). Requests above the cap return `400`.
+- **`from` / `to`**: epoch milliseconds; bounds are inclusive. `from > to`
+  returns `400`. Either or both can be omitted.
+- **Symbol must be in the tracked set** — otherwise `404`. This avoids
+  scanning the DB for arbitrary tickers.
+- Backed by an indexed read of `quotes(symbol, received_at_wall_ms DESC)`
+  via a separate read-only SQLite connection.
+
+### `GET /symbols` — tracked symbols
+
+```
+{"symbols": ["BTCUSDT", "ETHUSDT", ...], "count": 10}
+```
+
+The list is resolved once at startup from `InstrumentRanker.top10Symbols()`.
 
 ## Architecture
 
@@ -123,13 +160,24 @@ All values are optional; defaults come from `AppConfig`. Set via the
 container's environment (compose auto-loads `.env` if present), or directly
 when running locally.
 
-| Variable                    | Default                                   | Description                                              |
-|-----------------------------|-------------------------------------------|----------------------------------------------------------|
-| `QUOTES_BINANCE_WS_URL`     | `wss://data-stream.binance.vision`        | Binance spot market-data WebSocket endpoint              |
-| `QUOTES_DB_PATH`            | `./data/quotes.db` (host) / `/data/...`   | SQLite file path                                         |
-| `QUOTES_HTTP_PORT`          | `8080`                                    | Port for `GET /quotes/latest`                            |
-| `QUOTES_BATCH_MAX_SIZE`     | `100`                                     | Flush SQLite batch after this many quotes                |
-| `QUOTES_BATCH_MAX_WAIT_MS`  | `50`                                      | Or after this many ms since the first quote in the batch |
+| Variable                     | Default                                   | Description                                              |
+|------------------------------|-------------------------------------------|----------------------------------------------------------|
+| `QUOTES_BINANCE_WS_URL`      | `wss://data-stream.binance.vision`        | Binance spot market-data WebSocket endpoint              |
+| `QUOTES_DB_PATH`             | `./data/quotes.db` (host) / `/data/...`   | SQLite file path                                         |
+| `QUOTES_HTTP_PORT`           | `8080`                                    | Port for `GET /quotes/latest`                            |
+| `QUOTES_BATCH_MAX_SIZE`      | `100`                                     | Flush SQLite batch after this many quotes                |
+| `QUOTES_BATCH_MAX_WAIT_MS`   | `50`                                      | Or after this many ms since the first quote in the batch |
+| `QUOTES_HISTORY_MAX_LIMIT`   | `10000`                                   | Hard cap for `/quotes/{symbol}/history?limit=N`          |
+
+## Retention
+
+**The SQLite database grows unbounded.** Each quote is one INSERT; nothing
+deletes them. Observed footprint on the bundled top-10 list under normal
+Binance activity: roughly **750 MB / hour**, or ~18 GB / 24 h. Reviewers
+running the service for an extended period should monitor
+`./data/quotes.db` (and the WAL sidecar) and either truncate the file or
+add their own retention job. Not implemented in-process by design — the
+test scope is "save the quotes," not "manage them."
 
 ## Top-10 instrument list
 

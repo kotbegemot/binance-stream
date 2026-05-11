@@ -10,7 +10,8 @@ public record AppConfig(
         String dbPath,
         int httpPort,
         int batchMaxSize,
-        Duration batchMaxWait
+        Duration batchMaxWait,
+        int historyMaxLimit
 ) {
 
     public static final URI DEFAULT_BINANCE_WS = URI.create("wss://data-stream.binance.vision");
@@ -18,6 +19,7 @@ public record AppConfig(
     public static final int DEFAULT_HTTP_PORT = 8080;
     public static final int DEFAULT_BATCH_MAX_SIZE = 100;
     public static final Duration DEFAULT_BATCH_MAX_WAIT = Duration.ofMillis(50);
+    public static final int DEFAULT_HISTORY_MAX_LIMIT = 10_000;
 
     public static AppConfig fromEnv() {
         return fromEnv(System.getenv());
@@ -30,7 +32,8 @@ public record AppConfig(
                 Integer.parseInt(getOrDefault(env, "QUOTES_HTTP_PORT", Integer.toString(DEFAULT_HTTP_PORT))),
                 Integer.parseInt(getOrDefault(env, "QUOTES_BATCH_MAX_SIZE", Integer.toString(DEFAULT_BATCH_MAX_SIZE))),
                 Duration.ofMillis(Long.parseLong(
-                        getOrDefault(env, "QUOTES_BATCH_MAX_WAIT_MS", Long.toString(DEFAULT_BATCH_MAX_WAIT.toMillis()))))
+                        getOrDefault(env, "QUOTES_BATCH_MAX_WAIT_MS", Long.toString(DEFAULT_BATCH_MAX_WAIT.toMillis())))),
+                Integer.parseInt(getOrDefault(env, "QUOTES_HISTORY_MAX_LIMIT", Integer.toString(DEFAULT_HISTORY_MAX_LIMIT)))
         );
     }
 
@@ -45,7 +48,7 @@ public record AppConfig(
     @Override
     public String toString() {
         return String.format(Locale.ROOT,
-                "AppConfig[binanceWsUrl=%s, dbPath=%s, httpPort=%d, batchMaxSize=%d, batchMaxWait=%dms]",
-                binanceWsUrl, dbPath, httpPort, batchMaxSize, batchMaxWait.toMillis());
+                "AppConfig[binanceWsUrl=%s, dbPath=%s, httpPort=%d, batchMaxSize=%d, batchMaxWait=%dms, historyMaxLimit=%d]",
+                binanceWsUrl, dbPath, httpPort, batchMaxSize, batchMaxWait.toMillis(), historyMaxLimit);
     }
 }

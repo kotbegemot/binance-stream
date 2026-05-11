@@ -4,24 +4,33 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.stream.quotes.model.Quote;
 import io.stream.quotes.store.LatestQuoteStore;
+import io.stream.quotes.store.QuoteHistoryReader;
+import io.stream.quotes.store.SqliteQuoteWriter;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
 
 import java.math.BigDecimal;
 import java.net.URI;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
+import java.nio.file.Path;
+import java.time.Duration;
 import java.util.List;
+import java.util.concurrent.TimeUnit;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.awaitility.Awaitility.await;
 
 class HttpServerTest {
 
     private LatestQuoteStore store;
     private HttpServer server;
     private HttpClient http;
+    private SqliteQuoteWriter writer;
+    private QuoteHistoryReader history;
 
     @BeforeEach
     void setUp() {
@@ -34,10 +43,26 @@ class HttpServerTest {
         if (server != null) {
             server.close();
         }
+        if (history != null) {
+            history.close();
+        }
+        if (writer != null) {
+            writer.close();
+        }
     }
 
     private void startServer(String... trackedSymbols) {
         server = new HttpServer(0, store, List.of(trackedSymbols));
+        server.start();
+    }
+
+    private void startServerWithHistory(Path tmp, int historyMaxLimit, String... trackedSymbols) throws Exception {
+        String dbPath = tmp.resolve("quotes.db").toString();
+        writer = new SqliteQuoteWriter(dbPath, 100, Duration.ofMillis(20));
+        writer.start();
+        history = new QuoteHistoryReader(dbPath);
+        history.open();
+        server = new HttpServer(0, store, List.of(trackedSymbols), history, historyMaxLimit);
         server.start();
     }
 
@@ -173,6 +198,93 @@ class HttpServerTest {
         assertThat(body.get("symbols")).hasSize(3);
         assertThat(body.get("symbols").get(0).asText()).isEqualTo("BTCUSDT");
         assertThat(body.get("symbols").get(2).asText()).isEqualTo("SOLUSDT");
+    }
+
+    @Test
+    void historyReturnsRecentQuotesDescending(@TempDir Path tmp) throws Exception {
+        startServerWithHistory(tmp, 10_000, "BTCUSDT");
+        writeRows(quote("BTCUSDT", 1L, "1", "1", "1", "1", 1_000L),
+                  quote("BTCUSDT", 2L, "1", "1", "1", "1", 2_000L),
+                  quote("BTCUSDT", 3L, "1", "1", "1", "1", 3_000L));
+
+        HttpResponse<String> resp = get("/quotes/BTCUSDT/history?limit=10");
+
+        assertThat(resp.statusCode()).isEqualTo(200);
+        ObjectMapper mapper = new ObjectMapper();
+        JsonNode body = mapper.readTree(resp.body());
+        assertThat(body.isArray()).isTrue();
+        assertThat(body).hasSize(3);
+        assertThat(body.get(0).get("received_at_ms").asLong()).isEqualTo(3_000L);
+        assertThat(body.get(2).get("received_at_ms").asLong()).isEqualTo(1_000L);
+    }
+
+    @Test
+    void historyTimeRangeNarrowsResults(@TempDir Path tmp) throws Exception {
+        startServerWithHistory(tmp, 10_000, "BTCUSDT");
+        writeRows(
+                quote("BTCUSDT", 1L, "1", "1", "1", "1", 1_000L),
+                quote("BTCUSDT", 2L, "1", "1", "1", "1", 2_000L),
+                quote("BTCUSDT", 3L, "1", "1", "1", "1", 3_000L),
+                quote("BTCUSDT", 4L, "1", "1", "1", "1", 4_000L));
+
+        HttpResponse<String> resp = get("/quotes/BTCUSDT/history?from=2000&to=3500");
+
+        ObjectMapper mapper = new ObjectMapper();
+        JsonNode body = mapper.readTree(resp.body());
+        assertThat(body).hasSize(2);
+        assertThat(body.get(0).get("received_at_ms").asLong()).isEqualTo(3_000L);
+        assertThat(body.get(1).get("received_at_ms").asLong()).isEqualTo(2_000L);
+    }
+
+    @Test
+    void historyUnknownSymbolReturns404(@TempDir Path tmp) throws Exception {
+        startServerWithHistory(tmp, 10_000, "BTCUSDT");
+
+        HttpResponse<String> resp = get("/quotes/UNKNOWN/history");
+
+        assertThat(resp.statusCode()).isEqualTo(404);
+    }
+
+    @Test
+    void historyLimitAboveMaxReturns400(@TempDir Path tmp) throws Exception {
+        startServerWithHistory(tmp, 100, "BTCUSDT");
+
+        HttpResponse<String> resp = get("/quotes/BTCUSDT/history?limit=99999");
+
+        assertThat(resp.statusCode()).isEqualTo(400);
+        ObjectMapper mapper = new ObjectMapper();
+        assertThat(mapper.readTree(resp.body()).get("error").asText())
+                .contains("exceeds max");
+    }
+
+    @Test
+    void historyBadTimeRangeReturns400(@TempDir Path tmp) throws Exception {
+        startServerWithHistory(tmp, 10_000, "BTCUSDT");
+
+        HttpResponse<String> resp = get("/quotes/BTCUSDT/history?from=200&to=100");
+
+        assertThat(resp.statusCode()).isEqualTo(400);
+    }
+
+    @Test
+    void historyDisabledReturns503WhenNoReaderConfigured() throws Exception {
+        startServer("BTCUSDT");
+
+        HttpResponse<String> resp = get("/quotes/BTCUSDT/history");
+
+        assertThat(resp.statusCode()).isEqualTo(503);
+    }
+
+    private void writeRows(Quote... quotes) {
+        for (Quote q : quotes) {
+            writer.submit(q);
+        }
+        await().atMost(3, TimeUnit.SECONDS).until(() -> writer.queueSize() == 0);
+        try {
+            Thread.sleep(100);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+        }
     }
 
     private HttpResponse<String> get(String path) throws Exception {

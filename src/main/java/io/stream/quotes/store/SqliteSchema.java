@@ -19,6 +19,11 @@ public final class SqliteSchema {
             ) WITHOUT ROWID
             """;
 
+    public static final String CREATE_HISTORY_INDEX = """
+            CREATE INDEX IF NOT EXISTS idx_quotes_symbol_recv
+              ON quotes(symbol, received_at_wall_ms DESC)
+            """;
+
     private SqliteSchema() {
     }
 
@@ -35,6 +40,7 @@ public final class SqliteSchema {
     public static void createTables(Connection c) throws SQLException {
         try (Statement s = c.createStatement()) {
             s.execute(CREATE_QUOTES);
+            s.execute(CREATE_HISTORY_INDEX);
         }
     }
 }

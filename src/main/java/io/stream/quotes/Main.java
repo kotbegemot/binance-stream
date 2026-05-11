@@ -10,6 +10,7 @@ import io.stream.quotes.source.BinanceWsSource;
 import io.stream.quotes.source.BookTickerParser;
 import io.stream.quotes.source.QuoteSource;
 import io.stream.quotes.store.LatestQuoteStore;
+import io.stream.quotes.store.QuoteHistoryReader;
 import io.stream.quotes.store.SqliteQuoteWriter;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -43,7 +44,11 @@ public final class Main {
         QuotePipeline pipeline = new QuotePipeline(source, store, writer);
         pipeline.start();
 
-        HttpServer http = new HttpServer(config.httpPort(), store, symbols);
+        QuoteHistoryReader history = new QuoteHistoryReader(config.dbPath());
+        history.open();
+
+        HttpServer http = new HttpServer(
+                config.httpPort(), store, symbols, history, config.historyMaxLimit());
         http.start();
 
         Runtime.getRuntime().addShutdownHook(new Thread(() -> {
@@ -52,6 +57,11 @@ public final class Main {
                 http.close();
             } catch (Exception e) {
                 log.warn("error closing http server", e);
+            }
+            try {
+                history.close();
+            } catch (Exception e) {
+                log.warn("error closing history reader", e);
             }
             try {
                 pipeline.close();

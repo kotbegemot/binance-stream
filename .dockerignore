@@ -1,0 +1,16 @@
+.git
+.gitignore
+.gitattributes
+.idea
+.vscode
+*.iml
+build
+.gradle
+data
+*.db
+*.db-wal
+*.db-shm
+.env
+docs
+README.md
+LICENSE

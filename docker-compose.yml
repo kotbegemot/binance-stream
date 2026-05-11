@@ -1,0 +1,23 @@
+services:
+  service:
+    build:
+      context: .
+      target: runtime
+    image: binance-quotes-service:latest
+    env_file:
+      - path: .env
+        required: false
+    ports:
+      - "${QUOTES_HTTP_PORT:-8080}:8080"
+    volumes:
+      - ./data:/data
+    restart: unless-stopped
+
+  tests:
+    profiles: ["test"]
+    build:
+      context: .
+      target: builder
+    image: binance-quotes-service-builder:latest
+    working_dir: /app
+    command: ["./gradlew", "test", "--no-daemon"]

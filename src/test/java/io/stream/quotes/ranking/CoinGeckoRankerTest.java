@@ -135,4 +135,19 @@ class CoinGeckoRankerTest {
 
         assertThat(top).isEqualTo(staticRanker.top10Symbols());
     }
+
+    @Test
+    void skipsCandidatesNotTradableOnBinance() {
+        server.respondWith(200, fixtureJson);
+        CoinGeckoRanker ranker = new CoinGeckoRanker(
+                baseUrl, Duration.ofSeconds(2), staticRanker, filterSupplier,
+                () -> Set.of("BTCUSDT", "ETHUSDT", "BNBUSDT", "SOLUSDT", "XRPUSDT",
+                        "DOGEUSDT", "ADAUSDT", "TRXUSDT", "SHIBUSDT", "DOTUSDT"));
+
+        List<String> top = ranker.top10Symbols();
+
+        assertThat(top).hasSize(10);
+        assertThat(top).contains("DOTUSDT");
+        assertThat(top).doesNotContain("AVAXUSDT");
+    }
 }

@@ -28,6 +28,7 @@ public final class CoinGeckoRanker implements InstrumentRanker {
     private final Duration timeout;
     private final InstrumentRanker fallback;
     private final Supplier<Set<String>> filterSupplier;
+    private final TradableSymbols tradable;
     private final ObjectMapper mapper;
     private final HttpClient httpClient;
 
@@ -35,10 +36,19 @@ public final class CoinGeckoRanker implements InstrumentRanker {
                            Duration timeout,
                            InstrumentRanker fallback,
                            Supplier<Set<String>> filterSupplier) {
+        this(baseUrl, timeout, fallback, filterSupplier, () -> Set.of());
+    }
+
+    public CoinGeckoRanker(URI baseUrl,
+                           Duration timeout,
+                           InstrumentRanker fallback,
+                           Supplier<Set<String>> filterSupplier,
+                           TradableSymbols tradable) {
         this.baseUrl = Objects.requireNonNull(baseUrl, "baseUrl");
         this.timeout = Objects.requireNonNull(timeout, "timeout");
         this.fallback = Objects.requireNonNull(fallback, "fallback");
         this.filterSupplier = Objects.requireNonNull(filterSupplier, "filterSupplier");
+        this.tradable = Objects.requireNonNull(tradable, "tradable");
         this.mapper = new ObjectMapper();
         this.httpClient = HttpClient.newBuilder()
                 .connectTimeout(timeout)
@@ -69,6 +79,7 @@ public final class CoinGeckoRanker implements InstrumentRanker {
             }
 
             Set<String> filterSet = normalizeFilter(filterSupplier.get());
+            Set<String> ok = tradable.usdtTradingSymbols();
             List<String> result = new ArrayList<>(TOP_N);
             for (JsonNode node : root) {
                 JsonNode symbolNode = node.get("symbol");
@@ -79,7 +90,11 @@ public final class CoinGeckoRanker implements InstrumentRanker {
                 if (ticker.isEmpty() || filterSet.contains(ticker)) {
                     continue;
                 }
-                result.add(ticker + "USDT");
+                String symbol = ticker + "USDT";
+                if (!ok.isEmpty() && !ok.contains(symbol)) {
+                    continue;
+                }
+                result.add(symbol);
                 if (result.size() >= TOP_N) {
                     break;
                 }

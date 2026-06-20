@@ -4,11 +4,13 @@ import io.stream.quotes.api.HttpServer;
 import io.stream.quotes.api.HttpServerOptions;
 import io.stream.quotes.config.AppConfig;
 import io.stream.quotes.pipeline.QuotePipeline;
+import io.stream.quotes.ranking.BinanceExchangeInfo;
 import io.stream.quotes.ranking.CoinGeckoRanker;
 import io.stream.quotes.ranking.InstrumentRanker;
 import io.stream.quotes.ranking.RankingRefreshScheduler;
 import io.stream.quotes.ranking.StaticRanker;
 import io.stream.quotes.ranking.SymbolRegistry;
+import io.stream.quotes.ranking.TradableSymbols;
 import io.stream.quotes.source.BackoffPolicy;
 import io.stream.quotes.source.BinanceWsSource;
 import io.stream.quotes.source.BookTickerParser;
@@ -144,6 +146,8 @@ public final class Main {
             return staticRanker;
         }
         log.info("ranking source: coingecko ({})", config.coinGeckoUrl());
+        TradableSymbols tradable = new BinanceExchangeInfo(
+                config.binanceRestUrl(), config.binanceRestTimeout(), config.exchangeInfoTtl());
         return new CoinGeckoRanker(
                 config.coinGeckoUrl(),
                 config.coinGeckoTimeout(),
@@ -155,7 +159,8 @@ public final class Main {
                         log.warn("failed to read filter store, using empty filter for this call", e);
                         return Set.of();
                     }
-                });
+                },
+                tradable);
     }
 
     private static void ensureParentDir(String dbPath) {

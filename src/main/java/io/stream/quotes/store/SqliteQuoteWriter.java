@@ -77,21 +77,14 @@ public final class SqliteQuoteWriter implements AutoCloseable {
     }
 
     private List<Quote> collectBatch() throws InterruptedException {
-        List<Quote> batch = new ArrayList<>(batchMaxSize);
-        long deadlineNanos = System.nanoTime() + batchMaxWaitNanos;
-        while (batch.size() < batchMaxSize) {
-            long remaining = deadlineNanos - System.nanoTime();
-            if (remaining <= 0) {
-                break;
-            }
-            Quote q = queue.poll(remaining, TimeUnit.NANOSECONDS);
-            if (q == null) {
-                break;
-            }
-            batch.add(q);
+        Quote first = queue.poll(batchMaxWaitNanos, TimeUnit.NANOSECONDS);
+        if (first == null) {
+            return List.of();
         }
-        if (batch.isEmpty() && !running) {
-            queue.drainTo(batch);
+        List<Quote> batch = new ArrayList<>(batchMaxSize);
+        batch.add(first);
+        if (batchMaxSize > 1) {
+            queue.drainTo(batch, batchMaxSize - 1);
         }
         return batch;
     }

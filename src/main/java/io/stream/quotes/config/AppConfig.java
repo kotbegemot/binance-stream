@@ -20,7 +20,10 @@ public record AppConfig(
         Duration rankingRefreshInterval,
         String adminApiKey,
         List<String> corsAllowedOrigins,
-        long httpAsyncTimeoutMs
+        long httpAsyncTimeoutMs,
+        URI binanceRestUrl,
+        Duration binanceRestTimeout,
+        Duration exchangeInfoTtl
 ) {
 
     public static final URI DEFAULT_BINANCE_WS = URI.create("wss://data-stream.binance.vision");
@@ -35,6 +38,11 @@ public record AppConfig(
     public static final Duration DEFAULT_RANKING_REFRESH = Duration.ZERO;
     public static final String DEFAULT_ADMIN_API_KEY = "";
     public static final long DEFAULT_HTTP_ASYNC_TIMEOUT_MS = 0L;
+    // data-api.binance.vision — keyless market-data REST mirror, same family as the WS default
+    // data-stream.binance.vision; lower geo-block (HTTP 451) risk than api.binance.com. Override via env.
+    public static final URI DEFAULT_BINANCE_REST_URL = URI.create("https://data-api.binance.vision");
+    public static final Duration DEFAULT_BINANCE_REST_TIMEOUT = Duration.ofMillis(5_000);
+    public static final Duration DEFAULT_EXCHANGE_INFO_TTL = Duration.ofHours(1);
 
     public static final String RANKING_SOURCE_COINGECKO = "coingecko";
     public static final String RANKING_SOURCE_STATIC = "static";
@@ -72,7 +80,12 @@ public record AppConfig(
                         .filter(s -> !s.isEmpty())
                         .toList(),
                 Long.parseLong(getOrDefault(env, "QUOTES_HTTP_TIMEOUT_MS",
-                        Long.toString(DEFAULT_HTTP_ASYNC_TIMEOUT_MS)))
+                        Long.toString(DEFAULT_HTTP_ASYNC_TIMEOUT_MS))),
+                URI.create(getOrDefault(env, "QUOTES_BINANCE_REST_URL", DEFAULT_BINANCE_REST_URL.toString())),
+                Duration.ofMillis(Long.parseLong(getOrDefault(env, "QUOTES_BINANCE_REST_TIMEOUT_MS",
+                        Long.toString(DEFAULT_BINANCE_REST_TIMEOUT.toMillis())))),
+                Duration.ofMillis(Long.parseLong(getOrDefault(env, "QUOTES_EXCHANGE_INFO_TTL_MS",
+                        Long.toString(DEFAULT_EXCHANGE_INFO_TTL.toMillis()))))
         );
     }
 
@@ -102,11 +115,13 @@ public record AppConfig(
                 "AppConfig[binanceWsUrl=%s, dbPath=%s, httpPort=%d, batchMaxSize=%d, batchMaxWait=%dms, "
                         + "historyMaxLimit=%d, rankingSource=%s, coinGeckoUrl=%s, coinGeckoTimeout=%dms, "
                         + "rankingRefreshInterval=%dms, adminApiKey=%s, corsAllowedOrigins=%s, "
-                        + "httpAsyncTimeoutMs=%d]",
+                        + "httpAsyncTimeoutMs=%d, binanceRestUrl=%s, binanceRestTimeout=%dms, "
+                        + "exchangeInfoTtl=%dms]",
                 binanceWsUrl, dbPath, httpPort, batchMaxSize, batchMaxWait.toMillis(),
                 historyMaxLimit, rankingSource, coinGeckoUrl, coinGeckoTimeout.toMillis(),
                 rankingRefreshInterval.toMillis(), adminApiKey.isEmpty() ? "(none)" : "(set)",
                 corsAllowedOrigins.isEmpty() ? "(none)" : corsAllowedOrigins,
-                httpAsyncTimeoutMs);
+                httpAsyncTimeoutMs, binanceRestUrl, binanceRestTimeout.toMillis(),
+                exchangeInfoTtl.toMillis());
     }
 }

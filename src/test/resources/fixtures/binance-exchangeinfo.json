@@ -1,0 +1,19 @@
+{
+  "timezone": "UTC",
+  "serverTime": 1700000000000,
+  "symbols": [
+    {"symbol":"BTCUSDT","status":"TRADING","baseAsset":"BTC","quoteAsset":"USDT"},
+    {"symbol":"ETHUSDT","status":"TRADING","baseAsset":"ETH","quoteAsset":"USDT"},
+    {"symbol":"BNBUSDT","status":"TRADING","baseAsset":"BNB","quoteAsset":"USDT"},
+    {"symbol":"SOLUSDT","status":"TRADING","baseAsset":"SOL","quoteAsset":"USDT"},
+    {"symbol":"XRPUSDT","status":"TRADING","baseAsset":"XRP","quoteAsset":"USDT"},
+    {"symbol":"DOGEUSDT","status":"TRADING","baseAsset":"DOGE","quoteAsset":"USDT"},
+    {"symbol":"ADAUSDT","status":"TRADING","baseAsset":"ADA","quoteAsset":"USDT"},
+    {"symbol":"TRXUSDT","status":"TRADING","baseAsset":"TRX","quoteAsset":"USDT"},
+    {"symbol":"SHIBUSDT","status":"TRADING","baseAsset":"SHIB","quoteAsset":"USDT"},
+    {"symbol":"DOTUSDT","status":"TRADING","baseAsset":"DOT","quoteAsset":"USDT"},
+    {"symbol":"LINKUSDT","status":"TRADING","baseAsset":"LINK","quoteAsset":"USDT"},
+    {"symbol":"ETHBTC","status":"TRADING","baseAsset":"ETH","quoteAsset":"BTC"},
+    {"symbol":"FOOUSDT","status":"BREAK","baseAsset":"FOO","quoteAsset":"USDT"}
+  ]
+}

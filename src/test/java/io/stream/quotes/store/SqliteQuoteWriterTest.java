@@ -201,4 +201,19 @@ class SqliteQuoteWriterTest {
         await().atMost(10, TimeUnit.SECONDS).until(() -> rowCount(dbPath) == threads * perThread);
     }
 
+    @Test
+    void zeroBatchWaitStillPersistsWhileRunning(@TempDir Path tmp) throws Exception {
+        dbPath = tmp.resolve("quotes.db").toString();
+        provider = new SqliteConnectionProvider(dbPath);
+        provider.open();
+        writer = new SqliteQuoteWriter(provider.quoteWriterConnection(), 100, Duration.ZERO);
+        writer.start();
+
+        for (int i = 0; i < 50; i++) {
+            assertThat(writer.submit(quote("BTCUSDT", i, "1", "1", "1", "1", 0))).isTrue();
+        }
+
+        await().atMost(5, TimeUnit.SECONDS).until(() -> rowCount(dbPath) == 50);
+    }
+
 }

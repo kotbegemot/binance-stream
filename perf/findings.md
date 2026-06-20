@@ -81,13 +81,20 @@ FIGR_HELOCUSDT    0
 
 ## Non-perf finding (run #2): CoinGecko ↔ Binance set mismatch
 
-CoinGecko's top-30 by market cap on 2026-05-11 included three assets
+CoinGecko's top-30 by market cap on 2026-05-11 included two assets
 that do **not** have a `<ASSET>USDT` spot pair on Binance:
 
 - **FIGR_HELOC** (Figure Heloc — tokenised HELOC, not on Binance)
 - **WBT** (WhiteBIT Token — listed only on WhiteBIT)
-- **USDS** (Sky USDS — listed on Binance but as a stablecoin with
-  near-zero quote-ticker activity; 3 frames in 10 min)
+
+A third candidate, **USDS** (Sky USDS), is *not* a set-mismatch case:
+it **does** trade on Binance as `USDSUSDT` (re-verified 2026-06-20:
+status=TRADING, quoteAsset=USDT, ~640k 24h volume / 3925 trades). As a
+pegged stablecoin its best bid/ask barely moves, so it emitted only
+3 bookTicker frames in 10 min — a near-idle slot, but a real tradable
+pair. The Binance `exchangeInfo` validation therefore (correctly)
+keeps USDSUSDT; excluding it is a stablecoin-filter concern, not a
+tradability one.
 
 The service tolerates this gracefully — the WS subscription simply
 returns no frames for those streams — but the result is that 3 of
@@ -98,10 +105,17 @@ designed to fix: an operator can `PATCH /admin/symbols
 writes them to `admin_removed_symbols` so the periodic refresh
 doesn't silently re-add them).
 
-It is **explicitly out of scope** to call Binance `/exchangeInfo` at
-seed time and pre-validate that each candidate has a live USDT pair —
-see "Out of scope" in `docs/plane.md` and README. The admin endpoint
-is the chosen recovery path.
+At the time of run #2 it was **explicitly out of scope** to call
+Binance `/exchangeInfo` at seed time and pre-validate that each
+candidate has a live USDT pair — see "Out of scope" in `docs/plane.md`
+and README; the admin endpoint was the chosen recovery path.
+
+> **Update (2026-06-20):** seed-time `exchangeInfo` pre-validation was
+> subsequently implemented (`BinanceExchangeInfo`, keeping only
+> status=TRADING/quoteAsset=USDT candidates). It drops FIGR_HELOC and
+> WBT automatically; USDS survives because it is a real TRADING/USDT
+> pair, so the admin endpoint / stablecoin filter stays the recovery
+> path for near-idle stablecoin slots like it.
 
 USDS is also a candidate to add to `filtered_tickers` so the next
 refresh excludes it as a stablecoin (along with USDe, FDUSD,
